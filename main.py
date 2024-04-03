@@ -16,8 +16,9 @@ import glob
 import matplotlib.patches as patches
 import json
 from bokeh.plotting import figure, show
-from bokeh.models import BoxAnnotation, Label, Legend, LegendItem, WheelZoomTool
+from bokeh.models import BoxAnnotation, Label, Legend, LegendItem, WheelZoomTool, LabelSet, ColumnDataSource, DataTable, StringFormatter, NumberFormatter, IntEditor, NumberEditor, StringEditor, SelectEditor, DateFormatter, DateEditor, TableColumn
 from bokeh.io import output_file, save
+from bokeh.layouts import gridplot, column
 from math import pi
 
 
@@ -26,13 +27,6 @@ from math import pi
 
 API_URL = "https://api.scryfall.com/bulk-data"
 CURRENT_YEAR = 2024
-
-def main():
-    df = download_latest_data()
-    df = process_data(df)
-    how_wordy_are_cards(df,CURRENT_YEAR)
-    pass
-
 
 # Define a function to concatenate oracle_text from card_faces
 def concatenate_oracle_text(row):
@@ -52,7 +46,7 @@ def process_data(df):
     df = df[~df['set_name'].str.lower().str.contains('|'.join(excluded_keywords))]
 
     # Handle NaN values in 'oracle_text'
-    df['oracle_text'] = df['oracle_text'].fillna('')
+    df.loc[:, 'oracle_text'] = df['oracle_text'].fillna('')
 
     # Remove sets with fewer than 30 cards
     #filtered_sets = df['set_name'].value_counts()
@@ -144,6 +138,7 @@ def download_latest_data():
 
     return df
 
+
 def how_wordy_are_cards(df,year):
 
     # Calculate average word count per set per year
@@ -229,11 +224,121 @@ def how_wordy_are_cards(df,year):
     p.xaxis.major_label_overrides = {i: str(year) for i, year in enumerate(final_df['index_column'])}
     p.xaxis.major_label_orientation = 45
 
-    show(p)
+    #show(p)
     save(p, filename="./mtg-vis/wordiness.html")
 
+    return p
+
+
+def are_wordy_cards_pushing_out_flavour_text(df):
+
+# Sort by 'name' and 'released_at' so that the earliest print of a card is first
+    df = df.sort_values(by=['name', 'released_at'])
+
+# Drop duplicates keeping the first occurrence (which is the earliest release of a card)
+    df_unique = df.drop_duplicates(subset='name', keep='first').copy()
+
+# Create a year column for grouping
+    df_unique['year'] = df_unique['released_at'].dt.year
+
+# Group by set_name and year, and calculate the word count in oracle_text
+    word_counts = df_unique.groupby(['set_name', 'year', 'flavor_text'])['oracle_text'].apply(lambda x: x.str.split().str.len()).reset_index(name='word_count')
+    
+# Create a new column 'has_flavour_text' that is 1 if 'flavour_text' is not NaN, and 0 otherwise
+    df_unique['has_flavour_text'] = df_unique['flavor_text'].notnull().astype(int)
+
+# Group by 'year' and calculate the total number of cards and the number of cards with flavour text
+    total_cards_per_year = df_unique.groupby('year').size()
+    cards_with_flavour_text_per_year = df_unique.groupby('year')['has_flavour_text'].sum()
+
+# Create a DataFrame with the percentage of cards with flavour text
+    summary_data = pd.DataFrame({
+        'mean_word_count': word_counts.groupby('year')['word_count'].mean(),
+        'percentage_has_flavour_text': cards_with_flavour_text_per_year / total_cards_per_year * 100
+    }).reset_index()
+    
+# Rename the columns
+    summary_data = summary_data.rename(columns={'word_count': 'mean_word_count', 'percentage_has_flavour_text': 'percentage_has_flavour_text'})
+
+# Normalize the 'mean_word_count' column
+    #summary_data['mean_word_count'] = (summary_data['mean_word_count'] - summary_data['mean_word_count'].min()) / (summary_data['mean_word_count'].max() - summary_data['mean_word_count'].min())
+
+# Normalize the 'percentage_has_flavour_text' column
+    #summary_data['percentage_has_flavour_text'] = (summary_data['percentage_has_flavour_text'] - summary_data['percentage_has_flavour_text'].min()) / (summary_data['percentage_has_flavour_text'].max() - summary_data['percentage_has_flavour_text'].min())
+
+# Create a scatter plot to compare mean word count and sum of has flavour text
+    p = figure(title="Word Count vs Flavour Text", x_axis_label="Mean Word Count", y_axis_label="% Has Flavour Text", 
+               tools="pan,wheel_zoom,xbox_select,reset", sizing_mode="scale_width", height=800)
+
+# Hide the axis values (ticks and labels)
+    p.xaxis.major_label_text_font_size = '0pt'  # preferred method 
+    p.yaxis.major_label_text_font_size = '0pt'
+    p.xaxis.major_tick_line_color = None  # turn off x-axis major ticks
+    p.yaxis.major_tick_line_color = None  # turn off y-axis major ticks
+    p.xaxis.minor_tick_line_color = None  # turn off x-axis minor ticks
+    p.yaxis.minor_tick_line_color = None  # turn off y-axis minor ticks
+    
+# Add scatter plot
+    p.scatter(summary_data['mean_word_count'], summary_data['percentage_has_flavour_text'], size=10, color='navy', alpha=0.8, marker="circle")
+
+# Add a trend line
+    slope, intercept = np.polyfit(summary_data['mean_word_count'], summary_data['percentage_has_flavour_text'], 1)
+    x = np.linspace(summary_data['mean_word_count'].min(), summary_data['mean_word_count'].max(), 100)
+    y = slope * x + intercept
+    p.line(x, y, color='red', line_width=2)
+
+# Add data labels to the scatter plot
+    labels = LabelSet(x='mean_word_count', y='percentage_has_flavour_text', text='year', level='glyph',
+                    x_offset=5, y_offset=5, source=ColumnDataSource(summary_data))
+    p.add_layout(labels)
+
+# Create a DataFrame with un-normalized values
+    summary_data_unnormalized = pd.DataFrame({
+        'mean_word_count': word_counts.groupby('year')['word_count'].mean(),
+        'percentage_has_flavour_text': cards_with_flavour_text_per_year / total_cards_per_year
+    }).reset_index()
+
+# Create a ColumnDataSource from the un-normalized DataFrame
+    source = ColumnDataSource(summary_data_unnormalized)
+
+# Define the columns for the DataTable
+    columns = [
+        TableColumn(field="year", title="Year", editor=IntEditor(), formatter=NumberFormatter(format="0"), width=50),
+        TableColumn(field="mean_word_count", title="Mean Word Count", editor=NumberEditor(step=0.1), formatter=NumberFormatter(format="0.00")),
+        TableColumn(field="percentage_has_flavour_text", title="% Has Flavour Text", editor=NumberEditor(step=0.1), formatter=NumberFormatter(format="0.00%")),
+    ]
+
+# Create a DataTable
+    data_table = DataTable(source=source, columns=columns, editable=True, index_position=-1)   
+
+
+#Adjust the widths
+    p.width = 1200
+    data_table.width = 800
+
+# Add the scatter plot and the DataTable to the layout
+    layout = column(p, data_table)
+
+# Show the layout
+    return(layout)
+
+def generate_flavour_text_html(df):
+    flavour_text_layout = are_wordy_cards_pushing_out_flavour_text(df)
+    output_file("flavour_text.html")
+    save(flavour_text_layout, filename="./mtg-vis/flavour_text.html")
+    #show(flavour_text_layout)
     pass
 
+
+def main():
+    df = download_latest_data()
+    df = process_data(df)
+    #wordiness_graph = how_wordy_are_cards(df,CURRENT_YEAR)
+#Create a seperate page for the flavour text html
+    generate_flavour_text_html(df)
+    #grid = gridplot([[wordiness_graph], [ft_comparison_graph])
+    #save(grid, filename="./mtg-vis/dashboard.html")
+    
 
 if __name__ == "__main__":
     main()
